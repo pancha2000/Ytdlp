@@ -1,18 +1,25 @@
+"""
+YouTube Download API - Cookie-free version
+No cookies required, uses advanced bypass techniques
+"""
+
 import os
 import re
+import random
+import hashlib
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from yt_dlp import YoutubeDL
 import time
 from typing import Optional
+import subprocess
 
 app = FastAPI(
-    title="YouTube Download API",
-    description="Advanced YouTube video/audio download API with bot detection bypass",
-    version="2.0"
+    title="YouTube Download API - Cookie-Free",
+    description="YouTube download API without cookie dependency",
+    version="2.2"
 )
 
-# CORS එක enable කරනවා
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,332 +28,335 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-COOKIES_FILE = 'cookies.txt'
+# Cache for reducing duplicate requests
+download_cache = {}
+CACHE_DURATION = 3600  # 1 hour
 
-# Rate limiting සඳහා simple in-memory storage
 request_tracker = {}
 
-def is_bot_request(request: Request) -> bool:
-    """
-    Request එක bot එකකින් ආවේද කියලා detect කරනවා
-    """
-    user_agent = request.headers.get('user-agent', '').lower()
-    
-    # Common bot user agents
-    bot_patterns = [
-        'bot', 'crawler', 'spider', 'scraper', 'curl', 'wget',
-        'python-requests', 'postman', 'insomnia', 'axios'
-    ]
-    
-    # User agent එක තියේද බලනවා
-    if not user_agent:
-        return True
-    
-    # Bot patterns තියේද බලනවා
-    for pattern in bot_patterns:
-        if pattern in user_agent:
-            return True
-    
-    return False
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1',
+]
 
 def check_rate_limit(ip: str, limit: int = 10, window: int = 60) -> bool:
-    """
-    Rate limiting - එකම IP එකෙන් වැඩියෙන්ම requests එනවද බලනවා
-    """
     current_time = time.time()
-    
     if ip not in request_tracker:
         request_tracker[ip] = []
-    
-    # පරණ requests clear කරනවා
-    request_tracker[ip] = [
-        req_time for req_time in request_tracker[ip]
-        if current_time - req_time < window
-    ]
-    
-    # Limit එක exceeded වෙලාද බලනවා
+    request_tracker[ip] = [t for t in request_tracker[ip] if current_time - t < window]
     if len(request_tracker[ip]) >= limit:
         return False
-    
     request_tracker[ip].append(current_time)
     return True
 
-def get_ydl_opts(prefer_audio: bool = False, quality: str = 'best'):
+def get_cache_key(url: str, quality: str) -> str:
+    """Generate cache key"""
+    return hashlib.md5(f"{url}:{quality}".encode()).hexdigest()
+
+def get_from_cache(url: str, quality: str):
+    """Get from cache if available and not expired"""
+    key = get_cache_key(url, quality)
+    if key in download_cache:
+        data, timestamp = download_cache[key]
+        if time.time() - timestamp < CACHE_DURATION:
+            print(f"✅ Cache hit for {url}")
+            return data
+    return None
+
+def save_to_cache(url: str, quality: str, data):
+    """Save to cache"""
+    key = get_cache_key(url, quality)
+    download_cache[key] = (data, time.time())
+
+def get_aggressive_bypass_opts(quality: str = 'best', strategy: int = 0):
     """
-    Improved yt-dlp options with multiple fallback strategies
+    AGGRESSIVE bypass options - NO cookies required
+    Uses multiple Android/iOS client spoofing
     """
-    # Quality based format selection
-    if quality == 'audio':
-        format_str = 'bestaudio/best'
-    elif quality == 'low':
-        format_str = 'worst[ext=mp4]/worst'
-    elif quality == 'medium':
-        format_str = 'bestvideo[height<=720]+bestaudio/best[height<=720]/best'
-    else:  # best/high
-        format_str = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+    user_agent = random.choice(USER_AGENTS)
     
-    return {
+    # Format selection by quality
+    format_options = {
+        'audio': [
+            'bestaudio[ext=m4a]/bestaudio/best',
+            '140/bestaudio',
+            'bestaudio[acodec=opus]/bestaudio'
+        ],
+        'low': [
+            'worst[height<=360]/worst',
+            'best[height<=360]'
+        ],
+        'medium': [
+            'best[height<=720]',
+            'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        ],
+        'best': [
+            'best',
+            'bestvideo+bestaudio/best',
+            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best'
+        ]
+    }
+    
+    format_str = format_options.get(quality, format_options['best'])[min(strategy, 2)]
+    
+    # Different client strategies
+    client_strategies = [
+        ['android', 'android_music'],  # Strategy 0: Android clients
+        ['ios', 'mweb'],                # Strategy 1: iOS + mobile web
+        ['android_creator', 'ios'],     # Strategy 2: Creator apps
+        ['mweb', 'android'],           # Strategy 3: Mobile web fallback
+        ['android_testsuite', 'web'],  # Strategy 4: Test clients
+    ]
+    
+    clients = client_strategies[strategy % len(client_strategies)]
+    
+    opts = {
         'format': format_str,
-        'quiet': True,
-        'no_warnings': True,
-        'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
+        'quiet': False,  # Show output for debugging
+        'no_warnings': False,
+        'ignoreerrors': True,
         
-        # වැදගත්: YouTube bot detection මග හරින්න
+        # NO COOKIES! পूरी तरह बिना cookies के
+        'cookiefile': None,
+        
+        # CRITICAL: Advanced extraction arguments
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web', 'mweb'],
+                'player_client': clients,
                 'skip': ['dash', 'hls'],
+                # Force specific API endpoints
+                'player_skip': ['webpage'],
             }
         },
         
-        # Headers වැඩි දියුණු කරනවා
+        # Spoof mobile device
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-us,en;q=0.5',
-            'Sec-Fetch-Mode': 'navigate',
+            'User-Agent': user_agent,
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept': '*/*',
+            'Referer': 'https://www.youtube.com/',
+            'Origin': 'https://www.youtube.com',
         },
         
+        # Network options
         'nocheckcertificate': True,
         'geo_bypass': True,
-        'age_limit': None,
+        'geo_bypass_country': 'US',
         
-        # Retry logic
-        'retries': 3,
-        'fragment_retries': 3,
+        # Retry configuration
+        'retries': 10,
+        'fragment_retries': 10,
         'skip_unavailable_fragments': True,
+        'extractor_retries': 5,
+        
+        # Rate limiting
+        'sleep_interval': 1,
+        'max_sleep_interval': 3,
+        
+        # Additional bypass options
+        'age_limit': 100,
+        'extract_flat': False,
+        
+        # Force IPv4 (sometimes helps)
+        'source_address': '0.0.0.0',
     }
-
-def validate_youtube_url(url: str) -> bool:
-    """
-    URL එක valid YouTube URL එකක්ද බලනවා
-    """
-    youtube_patterns = [
-        r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/',
-        r'(https?://)?(www\.)?youtu\.be/',
-    ]
     
-    for pattern in youtube_patterns:
-        if re.match(pattern, url):
-            return True
-    return False
+    return opts
+
+def extract_with_multiple_strategies(url: str, quality: str = 'best', max_strategies: int = 5):
+    """
+    Try multiple bypass strategies sequentially
+    """
+    # Check cache first
+    cached = get_from_cache(url, quality)
+    if cached:
+        return cached
+    
+    last_error = None
+    
+    for strategy in range(max_strategies):
+        try:
+            print(f"\n{'='*60}")
+            print(f"🔄 Strategy {strategy + 1}/{max_strategies}")
+            print(f"{'='*60}")
+            
+            opts = get_aggressive_bypass_opts(quality=quality, strategy=strategy)
+            
+            with YoutubeDL(opts) as ydl:
+                print(f"Extracting info from {url}...")
+                info = ydl.extract_info(url, download=False)
+                
+                if not info:
+                    print("❌ No info extracted")
+                    continue
+                
+                print(f"✅ Info extracted: {info.get('title', 'Unknown')}")
+                
+                # Extract download URL
+                download_url = None
+                
+                # Try different methods
+                if 'url' in info:
+                    download_url = info['url']
+                    print(f"✅ Got direct URL")
+                
+                elif 'formats' in info and info['formats']:
+                    formats = info['formats']
+                    print(f"📋 Found {len(formats)} formats")
+                    
+                    if quality == 'audio':
+                        # Get best audio
+                        audio_formats = [f for f in formats 
+                                       if f.get('acodec') != 'none' 
+                                       and f.get('url')
+                                       and not f.get('vcodec') or f.get('vcodec') == 'none']
+                        if audio_formats:
+                            best = max(audio_formats, key=lambda x: x.get('abr', 0) or x.get('tbr', 0) or 0)
+                            download_url = best['url']
+                            print(f"✅ Got audio URL (codec: {best.get('acodec')})")
+                    else:
+                        # Get best video
+                        valid = [f for f in formats if f.get('url')]
+                        if valid:
+                            download_url = valid[-1]['url']
+                            print(f"✅ Got video URL")
+                
+                elif 'requested_formats' in info:
+                    download_url = info['requested_formats'][0]['url']
+                    print(f"✅ Got URL from requested_formats")
+                
+                if download_url:
+                    result = {
+                        'success': True,
+                        'data': info,
+                        'download_url': download_url,
+                        'strategy': strategy + 1,
+                        'cached': False
+                    }
+                    
+                    # Save to cache
+                    save_to_cache(url, quality, result)
+                    
+                    print(f"✅✅ SUCCESS with strategy {strategy + 1}!")
+                    return result
+                else:
+                    print(f"❌ No download URL found in info")
+                    
+        except Exception as e:
+            error_str = str(e)
+            last_error = error_str
+            print(f"❌ Strategy {strategy + 1} failed: {error_str}")
+            
+            # If it's a known bot detection error, try next strategy immediately
+            if "Sign in to confirm" in error_str or "bot" in error_str.lower():
+                print("⚠️ Bot detected, trying next strategy...")
+                continue
+            
+            # For other errors, wait a bit
+            if strategy < max_strategies - 1:
+                wait = min(2 ** strategy, 10)
+                print(f"⏳ Waiting {wait}s...")
+                time.sleep(wait)
+    
+    print(f"\n❌❌ All {max_strategies} strategies failed")
+    return {
+        'success': False,
+        'error': last_error or "All extraction strategies failed",
+        'attempted': max_strategies
+    }
 
 @app.get("/")
 async def root():
-    """
-    API status check කරන endpoint
-    """
     return {
-        "status": "Running",
-        "version": "2.0",
-        "endpoints": {
-            "download": "/api/download?url=<youtube_url>&quality=<best|medium|low|audio>",
-            "info": "/api/info?url=<youtube_url>",
-            "health": "/health"
-        }
+        "status": "Running - Cookie-Free Mode",
+        "version": "2.2",
+        "mode": "NO_COOKIES_REQUIRED",
+        "strategies": 5,
+        "features": [
+            "Cookie-free operation",
+            "5 different bypass strategies",
+            "Automatic retry with exponential backoff",
+            "Result caching (1 hour)",
+            "Mobile client spoofing"
+        ]
     }
 
 @app.get("/health")
-async def health_check():
-    """
-    Health check endpoint
-    """
+async def health():
     return {
         "status": "healthy",
-        "timestamp": time.time()
+        "mode": "cookie_free",
+        "cache_size": len(download_cache)
     }
 
-@app.get("/api/info")
-async def get_video_info(url: str, request: Request):
-    """
-    Video information පමණක් ගන්න endpoint (download link නැතිව)
-    """
-    # Bot detection
-    if is_bot_request(request):
-        raise HTTPException(
-            status_code=403, 
-            detail="Bot requests are not allowed. Please use a valid browser."
-        )
-    
-    # Rate limiting
-    client_ip = request.client.host
-    if not check_rate_limit(client_ip):
-        raise HTTPException(
-            status_code=429, 
-            detail="Too many requests. Please try again later."
-        )
-    
-    # URL validation
-    if not url or not validate_youtube_url(url):
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid YouTube URL"
-        )
-    
-    ydl_opts = get_ydl_opts()
-    ydl_opts['skip_download'] = True
-    
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            return {
-                "success": True,
-                "title": info.get('title'),
-                "duration": info.get('duration'),
-                "thumbnail": info.get('thumbnail'),
-                "uploader": info.get('uploader'),
-                "view_count": info.get('view_count'),
-                "upload_date": info.get('upload_date'),
-                "description": info.get('description', '')[:200] + '...' if info.get('description') else None,
-            }
-            
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Error: {error_msg}")
-        
-        if "Sign in to confirm you're not a bot" in error_msg or "bot" in error_msg.lower():
-            raise HTTPException(
-                status_code=403,
-                detail="YouTube detected automation. Please update cookies.txt file."
-            )
-        elif "Video unavailable" in error_msg:
-            raise HTTPException(status_code=404, detail="Video not found or unavailable")
-        elif "Private video" in error_msg:
-            raise HTTPException(status_code=403, detail="This video is private")
-        else:
-            raise HTTPException(status_code=500, detail=f"Error: {error_msg}")
+@app.get("/clear-cache")
+async def clear_cache():
+    """Clear download cache"""
+    size = len(download_cache)
+    download_cache.clear()
+    return {"cleared": size, "message": f"Cleared {size} cached items"}
 
 @app.get("/api/download")
-async def download_video(
-    url: str, 
-    quality: Optional[str] = 'best',
-    request: Request = None
-):
+async def download_video(url: str, quality: str = 'best', request: Request = None):
     """
-    YouTube video download link එක ගන්න endpoint
-    
-    Parameters:
-    - url: YouTube video URL
-    - quality: best (default), medium, low, audio
+    Download endpoint - Cookie-free version
     """
-    # Bot detection
-    if is_bot_request(request):
-        raise HTTPException(
-            status_code=403, 
-            detail="Bot requests are not allowed. Please use a valid browser."
-        )
-    
     # Rate limiting
-    client_ip = request.client.host
-    if not check_rate_limit(client_ip, limit=5, window=60):
-        raise HTTPException(
-            status_code=429, 
-            detail="Too many download requests. Please wait a minute."
-        )
+    if not check_rate_limit(request.client.host, limit=8, window=60):
+        raise HTTPException(429, "Too many requests")
     
     # URL validation
-    if not url or not validate_youtube_url(url):
-        raise HTTPException(
-            status_code=400, 
-            detail="Invalid YouTube URL"
-        )
+    if not re.match(r'(https?://)?(www\.)?(youtube|youtu)\.(com|be)/', url):
+        raise HTTPException(400, "Invalid YouTube URL")
     
     # Quality validation
-    valid_qualities = ['best', 'medium', 'low', 'audio']
-    if quality not in valid_qualities:
+    if quality not in ['best', 'medium', 'low', 'audio']:
         quality = 'best'
     
-    ydl_opts = get_ydl_opts(quality=quality)
+    print(f"\n{'='*60}")
+    print(f"📥 NEW REQUEST")
+    print(f"URL: {url}")
+    print(f"Quality: {quality}")
+    print(f"{'='*60}")
     
-    try:
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # Download URL එක extract කරනවා
-            download_url = None
-            
-            # Method 1: Direct URL තියේද බලනවා
-            if 'url' in info:
-                download_url = info['url']
-            
-            # Method 2: Formats array එකෙන් ගන්නවා
-            elif 'formats' in info and len(info['formats']) > 0:
-                # Best format එක තෝරගන්නවා
-                formats = info['formats']
-                
-                # Audio පමණක් නම්
-                if quality == 'audio':
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                    if audio_formats:
-                        download_url = audio_formats[-1]['url']
-                else:
-                    # Video formats
-                    video_formats = [f for f in formats if f.get('vcodec') != 'none']
-                    if video_formats:
-                        download_url = video_formats[-1]['url']
-                    else:
-                        download_url = formats[-1]['url']
-            
-            # Method 3: requested_formats (merged formats)
-            elif 'requested_formats' in info:
-                download_url = info['requested_formats'][0]['url']
-            
-            if not download_url:
-                raise Exception("Could not extract download URL")
-            
-            return {
-                "success": True,
-                "title": info.get('title'),
-                "download_url": download_url,
-                "quality": quality,
-                "duration": info.get('duration'),
-                "thumbnail": info.get('thumbnail'),
-                "filesize": info.get('filesize') or info.get('filesize_approx'),
+    # Try extraction with multiple strategies
+    result = extract_with_multiple_strategies(url, quality, max_strategies=5)
+    
+    if not result['success']:
+        raise HTTPException(
+            500,
+            detail={
+                "error": "All extraction strategies failed",
+                "message": result['error'],
+                "attempted_strategies": result.get('attempted', 5),
+                "solutions": [
+                    "1. Try different quality: audio, medium, or low",
+                    "2. Wait 2-3 minutes and try again",
+                    "3. Try a different video to test",
+                    "4. Some videos may be region-locked or require sign-in",
+                    "5. Visit /clear-cache to clear cache and retry"
+                ]
             }
-            
-    except Exception as e:
-        error_msg = str(e)
-        print(f"Error log: {error_msg}")
-        
-        # විවිධ error types හඳුනා ගන්නවා
-        if "Sign in to confirm you're not a bot" in error_msg or "bot" in error_msg.lower():
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "Bot Detection",
-                    "message": "YouTube detected automation. Please update cookies.txt file or try again later.",
-                    "solution": "Get fresh cookies from your browser and update cookies.txt"
-                }
-            )
-        elif "format is not available" in error_msg.lower():
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "Format Not Available",
-                    "message": "The requested format is not available. Trying alternative...",
-                    "solution": "Try with quality=medium or quality=audio parameter"
-                }
-            )
-        elif "Video unavailable" in error_msg:
-            raise HTTPException(status_code=404, detail="Video not found or unavailable")
-        elif "Private video" in error_msg:
-            raise HTTPException(status_code=403, detail="This video is private")
-        elif "age-restricted" in error_msg.lower():
-            raise HTTPException(
-                status_code=403,
-                detail="This video is age-restricted. Authentication required."
-            )
-        else:
-            raise HTTPException(
-                status_code=500, 
-                detail={
-                    "error": "Server Error",
-                    "message": error_msg,
-                    "url": url
-                }
-            )
+        )
+    
+    info = result['data']
+    
+    return {
+        "success": True,
+        "title": info.get('title'),
+        "download_url": result['download_url'],
+        "quality": quality,
+        "duration": info.get('duration'),
+        "thumbnail": info.get('thumbnail'),
+        "strategy_used": result['strategy'],
+        "from_cache": result.get('cached', False),
+        "note": "Download link expires in ~6 hours"
+    }
 
 if __name__ == "__main__":
     import uvicorn
+    print("🚀 Starting Cookie-Free YouTube Download API...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
