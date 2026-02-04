@@ -1,0 +1,23 @@
+# Netscape HTTP Cookie File
+# This is a generated file! Do not edit.
+# මෙය example file එකක්. ඔබේ browser එකෙන් real cookies ගන්න ඕන.
+
+# How to get cookies (Cookies ගන්නේ කොහොමද):
+# 
+# 1. Chrome/Firefox වල "Get cookies.txt" extension එක install කරන්න
+#    Chrome: https://chrome.google.com/webstore/detail/get-cookiestxt/bgaddhkoddajcdgocldbbfleckgcbcid
+#    Firefox: https://addons.mozilla.org/en-US/firefox/addon/cookies-txt/
+#
+# 2. youtube.com වල login වෙන්න ඔබේ account එකට
+#
+# 3. Extension එක click කරලා "Export" කරන්න
+#
+# 4. Download වෙච්ච cookies.txt file එක මේ file එකට replace කරන්න
+#
+# Note: Cookies expire වෙනවා. Regular update කරන්න ඕන.
+
+# Example format (මෙහි ඇත්තේ example format එක පමණයි):
+# .youtube.com	TRUE	/	TRUE	0	CONSENT	YES+
+# .youtube.com	TRUE	/	FALSE	0	VISITOR_INFO1_LIVE	example_value
+
+# ඔබේ actual cookies මෙතන paste කරන්න
